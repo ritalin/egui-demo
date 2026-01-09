@@ -23,6 +23,7 @@ pub struct WgpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    is_dirty: bool,
 }
 impl WgpuRenderer {
     pub async fn create(frame_width: u32, framw_height: u32, target: &RawWindow) -> Result<Self, anyhow::Error> {
@@ -72,6 +73,7 @@ impl WgpuRenderer {
             device,
             queue,
             config,
+            is_dirty: false,
         })
     }
 
@@ -79,5 +81,42 @@ impl WgpuRenderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.is_dirty = true;
+    }
+
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        if !self.is_dirty {
+            return Ok(())
+        }
+
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render encoder"),
+        });
+
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color{ r: 0.1, g: 0.2, b: 0.3, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+        Ok(())
     }
 }

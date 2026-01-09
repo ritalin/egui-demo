@@ -3,10 +3,17 @@ use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{self, El
 
 use crate::render;
 
+struct AppState {}
+
+impl AppState {
+    fn update(&self) {}
+}
+
 pub struct App {
     main_window: Option<Arc<Window>>,
     raw_handle: Option<render::RawWindow>,
     renderer: Option<render::WgpuRenderer>,
+    state: AppState,
 }
 impl App {
     const DEFAULT_WIDTH: u32 = 1360;
@@ -17,6 +24,7 @@ impl App {
             main_window: None,
             raw_handle: None,
             renderer: None,
+            state: AppState {  },
         }
     }
 
@@ -32,19 +40,31 @@ impl App {
     }
 
     fn handle_close_requested(&self, event_loop: &ActiveEventLoop) {
-        println!("Terminating App...");
+        log::info!("Terminating App...");
         event_loop.exit();
     }
 
     fn handle_resize(&mut self, _event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
-        println!("Resize requested: width: {width}, height: {height}", width = size.width, height = size.height);
+        log::info!("Resize requested: width: {width}, height: {height}", width = size.width, height = size.height);
         if let Some(renderer) = self.renderer.as_mut() && (size.width > 0) && (size.height > 0) {
             renderer.request_resize(size.width, size.height);
         }
     }
 
-    fn handle_redraw(&self, _event_loop: &ActiveEventLoop) {
-        println!("redraw requested");
+    fn handle_redraw(&mut self, _event_loop: &ActiveEventLoop) {
+        if let (Some(w), Some(r)) = (self.main_window.as_ref(), self.renderer.as_mut()) {
+            self.state.update();
+            w.request_redraw(); // Reserve the next redrawing
+            match r.render() {
+                Ok(_) => {},
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    let size = w.inner_size();
+                    r.request_resize(size.width, size.height);
+                }
+                Err(e) => log::error!("Unable to render (reason: {e}"),
+            }
+        }
+        // println!("redraw requested");
     }
 }
 
