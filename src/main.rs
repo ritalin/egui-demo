@@ -2,6 +2,7 @@ use egui_demo::app;
 use winit::event_loop::EventLoop;
 
 fn main() -> Result<(), anyhow::Error> {
+    env_logger::init();
     pollster::block_on(run())
 }
 
