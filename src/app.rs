@@ -3,10 +3,35 @@ use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{self, El
 
 use crate::render;
 
-struct AppState {}
-
+struct AppState {
+    cx: egui::Context,
+    input: egui::RawInput,
+}
 impl AppState {
-    fn update(&self) {}
+    fn new() -> Self {
+        Self {
+            cx: egui::Context::default(),
+            input: egui::RawInput {
+                viewport_id: egui::viewport::ViewportId::ROOT,
+                focused: false,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn update(&mut self, scale_factor: f64) -> egui::FullOutput {
+        let mut input = self.input.clone();
+        let viewport = input.viewports.entry(input.viewport_id).or_default();
+        viewport.native_pixels_per_point = Some(scale_factor as f32);
+
+        self.cx.run(input, |cx| {
+            egui::Area::new(egui::Id::new("winit + egui + wgpu says hello!"))
+                .show(cx, |ui| {
+                    ui.label("Label!");
+                })
+            ;
+        })
+    }
 }
 
 pub struct App {
@@ -24,7 +49,7 @@ impl App {
             main_window: None,
             raw_handle: None,
             renderer: None,
-            state: AppState {  },
+            state: AppState::new(),
         }
     }
 
@@ -33,7 +58,11 @@ impl App {
         let _ = w.request_inner_size(PhysicalSize::new(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT));
         let raw_handle = render::RawWindow::create(&w)?;
 
-        self.renderer = Some(render::WgpuRenderer::create(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT, &raw_handle).await?);
+        let mut renderer = render::WgpuRenderer::create(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT, &raw_handle).await?;
+        renderer.request_resize(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT);
+
+        self.renderer = Some(renderer);
+
         self.main_window.get_or_insert_with(|| w);
         self.raw_handle = Some(raw_handle);
         Ok(())
@@ -53,13 +82,28 @@ impl App {
 
     fn handle_redraw(&mut self, _event_loop: &ActiveEventLoop) {
         if let (Some(w), Some(r)) = (self.main_window.as_ref(), self.renderer.as_mut()) {
-            self.state.update();
+            if let Some(y) = w.is_minimized() && y {
+                log::info!("Skip to render because the window is minimized");
+                return;
+            }
+            let output = self.state.update(w.scale_factor());
+            // dump_output(&output).expect("failed to dump egui output");
+
+            let triangles = self.state.cx.tessellate(output.shapes, output.pixels_per_point);
+
             w.request_redraw(); // Reserve the next redrawing
-            match r.render() {
+
+            let size = w.inner_size();
+            let screen = render::ScreenDescriptor {
+                pixel_per_point: output.pixels_per_point,
+                screen_width: size.width,
+                screen_height: size.height,
+            };
+
+            match r.render(&screen, &triangles) {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                    let size = w.inner_size();
-                    r.request_resize(size.width, size.height);
+                    r.request_resize(screen.screen_width, screen.screen_height);
                 }
                 Err(e) => log::error!("Unable to render (reason: {e}"),
             }
@@ -107,4 +151,31 @@ impl ApplicationHandler for App {
             }
         }
     }
+}
+
+#[allow(unused)]
+fn dump_output(output: &egui::FullOutput) -> Result<(), anyhow::Error> {
+    println!("** Dump/ppp: {}", output.pixels_per_point);
+    println!("** Dump output for platform");
+    println!("{}", serde_json::to_string_pretty(&output.platform_output)?);
+    println!();
+
+    println!("** Dump output for viewports");
+    for (id, vp) in &output.viewport_output {
+        println!("viewport/id: {:?}, parent_id: {:?}, ", id, vp.parent);
+        println!("    class: {}, delay: {:?}", serde_json::to_string(&vp.class)?, vp.repaint_delay);
+        println!("    commands: {:?}", vp.commands);
+    }
+    println!();
+
+    println!("** Dump output for texture delta");
+    println!("{}", serde_json::to_string_pretty(&output.textures_delta)?);
+
+    println!("** Dump output for shapes");
+    for (i, shape) in output.shapes.iter().enumerate() {
+        println!("[{i:>4}] {:?}", shape);
+    }
+    println!("----");
+
+    Ok(())
 }
