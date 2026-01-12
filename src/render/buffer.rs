@@ -33,7 +33,7 @@ pub fn measure_buffer_size(triangles: &[egui::ClippedPrimitive]) -> (u64, u64) {
     ((vertex_count * size_of::<egui::epaint::Vertex>()) as u64, (index_count * size_of::<u32>()) as u64)
 }
 
-pub fn update_vertex_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buffer_size: u64, triangles: &[egui::ClippedPrimitive], buffer: &mut wgpu::Buffer) {
+pub fn send_vertex_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buffer_size: u64, triangles: &[egui::ClippedPrimitive], buffer: &mut wgpu::Buffer) {
     if buffer.size() <= buffer_size {
         *buffer = make_vertex_buffer(device, buffer_size * 2);
     }
@@ -54,7 +54,7 @@ pub fn update_vertex_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buff
     }
 }
 
-pub fn update_index_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buffer_size: u64, triangles: &[egui::ClippedPrimitive], buffer: &mut wgpu::Buffer) {
+pub fn send_index_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buffer_size: u64, triangles: &[egui::ClippedPrimitive], buffer: &mut wgpu::Buffer) {
     if buffer.size() <= buffer_size {
         *buffer = make_index_buffer(device, buffer_size * 2);
     }
