@@ -1,5 +1,7 @@
+use std::num::NonZeroU64;
+
 use egui::epaint::Vertex;
-use wgpu::{SurfaceTargetUnsafe, rwh::{HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle}};
+use wgpu::{SurfaceTargetUnsafe, rwh::{HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle}, util::DeviceExt};
 
 mod buffer;
 
@@ -34,6 +36,8 @@ pub struct WgpuRenderer {
     config: wgpu::SurfaceConfiguration,
     texture_layout: wgpu::BindGroupLayout,
     texture_fallback: wgpu::BindGroup,
+    uniform: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     bg_pipeline: wgpu::RenderPipeline,
@@ -105,6 +109,47 @@ impl WgpuRenderer {
                 },
             ]
         });
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Uniform bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<buffer::UniformBuffer>() as _),
+                    },
+                    count: None,
+                }
+            ],
+        });
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform buffer"),
+            contents: bytemuck::cast_slice(&[
+                buffer::UniformBuffer {
+                    screen_size_opints: [0.0, 0.0],
+                    dithering: 0,
+                    predicatable_texture_fintering: 0,
+                }
+            ]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let uniform = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform bind group"),
+            layout: &uniform_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                }
+            ],
+        });
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Default texture sampler"),
@@ -143,7 +188,7 @@ impl WgpuRenderer {
         let index_buffer = buffer::make_index_buffer(&device, size_of::<u32>() as u64 * 1024 * 3);
 
         let bg_pipeline = make_background_pipeline(&device, &config);
-        let fg_pipeline = make_freground_pipeline(&device, &config, &[&texture_layout]);
+        let fg_pipeline = make_freground_pipeline(&device, &config, &[&uniform_layout, &texture_layout]);
 
         Ok(Self {
             surface,
@@ -152,6 +197,8 @@ impl WgpuRenderer {
             config,
             texture_layout,
             texture_fallback,
+            uniform,
+            uniform_buffer,
             vertex_buffer,
             index_buffer,
             bg_pipeline,
@@ -159,10 +206,11 @@ impl WgpuRenderer {
         })
     }
 
-    pub fn request_resize(&mut self, width: u32, height: u32) {
-        self.config.width = width;
-        self.config.height = height;
+    pub fn request_resize(&mut self, screen: ScreenDescriptor) {
+        self.config.width = screen.screen_width;
+        self.config.height = screen.screen_height;
         self.surface.configure(&self.device, &self.config);
+        buffer::send_uniform_buffer(&self.queue, &screen, &self.uniform_buffer);
     }
 
     pub fn render(
@@ -185,7 +233,7 @@ impl WgpuRenderer {
         if (vbuffer_size > 0) && (ibuffer_size > 0) {
             buffer::send_vertex_buffer(&mut self.device, &self.queue, vbuffer_size, triangles, &mut self.vertex_buffer);
             buffer::send_index_buffer(&mut self.device, &self.queue, ibuffer_size, triangles, &mut self.index_buffer);
-            encode_fg(&mut encoder, &texture_view, &self.fg_pipeline, &self.vertex_buffer, &self.index_buffer, &self.texture_fallback, screen, triangles);
+            encode_fg(&mut encoder, &texture_view, &self.fg_pipeline, &self.vertex_buffer, &self.index_buffer, &self.uniform, &self.texture_fallback, screen, triangles);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -248,7 +296,7 @@ fn make_freground_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfigur
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{
-        label: Some("Render background pipline"),
+        label: Some("Render frontend pipline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -275,7 +323,7 @@ fn make_freground_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfigur
         multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some("fs_main_gamma_framebuffer"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[
                 Some(wgpu::ColorTargetState {
@@ -320,6 +368,7 @@ fn encode_fg(
     pipeline: &wgpu::RenderPipeline,
     vertex_buffer: &wgpu::Buffer,
     index_buffer: &wgpu::Buffer,
+    uniform_bind_group: &wgpu::BindGroup,
     bind_group_fallback: &wgpu::BindGroup,
     screen: &ScreenDescriptor,
     triangles: &[egui::ClippedPrimitive])
@@ -343,12 +392,16 @@ fn encode_fg(
         multiview_mask: None,
     });
 
+    pass.set_viewport(0.0, 0.0, screen.screen_width as f32, screen.screen_height as f32, 0.0, 1.0);
     pass.set_pipeline(pipeline);
+
+    // reset viewport
+    pass.set_bind_group(0, uniform_bind_group, &[]);
 
     let mut voffset = 0;
     let mut ioffset = 0;
 
-    pass.set_bind_group(0, bind_group_fallback, &[]);
+    pass.set_bind_group(1, bind_group_fallback, &[]);
 
     for egui::ClippedPrimitive{ clip_rect, primitive } in triangles {
         let Some((x, y, width, height)) = to_scissor_rect(clip_rect, &screen) else { continue };

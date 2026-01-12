@@ -58,8 +58,14 @@ impl App {
         let _ = w.request_inner_size(PhysicalSize::new(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT));
         let raw_handle = render::RawWindow::create(&w)?;
 
-        let mut renderer = render::WgpuRenderer::create(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT, &raw_handle).await?;
-        renderer.request_resize(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT);
+        let screen = render::ScreenDescriptor {
+            pixel_per_point: w.scale_factor() as f32,
+            screen_width: Self::DEFAULT_WIDTH,
+            screen_height: Self::DEFAULT_HEIGHT,
+        };
+
+        let mut renderer = render::WgpuRenderer::create(screen.screen_width, screen.screen_height, &raw_handle).await?;
+        renderer.request_resize(screen);
 
         self.renderer = Some(renderer);
 
@@ -75,8 +81,13 @@ impl App {
 
     fn handle_resize(&mut self, _event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
         log::info!("Resize requested: width: {width}, height: {height}", width = size.width, height = size.height);
-        if let Some(renderer) = self.renderer.as_mut() && (size.width > 0) && (size.height > 0) {
-            renderer.request_resize(size.width, size.height);
+        if let (Some(w), Some(renderer)) = (self.main_window.as_ref(), self.renderer.as_mut()) && (size.width > 0) && (size.height > 0) {
+            let screen = render::ScreenDescriptor {
+                pixel_per_point: w.scale_factor() as f32,
+                screen_width: size.width,
+                screen_height: size.height,
+            };
+            renderer.request_resize(screen);
         }
     }
 
@@ -100,10 +111,11 @@ impl App {
                 screen_height: size.height,
             };
 
+            // match r.render(&screen, &triangles, &output.textures_delta) {
             match r.render(&screen, &triangles) {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                    r.request_resize(screen.screen_width, screen.screen_height);
+                    r.request_resize(screen);
                 }
                 Err(e) => log::error!("Unable to render (reason: {e}"),
             }

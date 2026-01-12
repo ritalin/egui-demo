@@ -1,5 +1,4 @@
-use std::num::NonZero;
-
+use std::{num::NonZero, task::Waker};
 
 pub fn make_index_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
@@ -75,4 +74,27 @@ pub fn send_index_buffer(device: &mut wgpu::Device, queue: &wgpu::Queue, buffer_
         }
     }
 
+}
+
+
+/// Reproduced from https://github.com/emilk/egui
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct UniformBuffer {
+    pub screen_size_opints: [f32; 2],
+    pub dithering: u32,
+    pub predicatable_texture_fintering: u32,
+}
+
+pub fn send_uniform_buffer(queue: &wgpu::Queue, screen: &super::ScreenDescriptor, buffer: &wgpu::Buffer) {
+    let w = screen.screen_width as f32 / screen.pixel_per_point;
+    let h = screen.screen_height as f32 / screen.pixel_per_point;
+
+    let content = UniformBuffer {
+        screen_size_opints: [w, h],
+        dithering: 0,
+        predicatable_texture_fintering: 0,
+    };
+
+    queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[content]));
 }
