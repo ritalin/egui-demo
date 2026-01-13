@@ -1,5 +1,9 @@
 use std::num::NonZero;
 
+use egui::ahash::HashMap;
+
+use crate::render::texture::TextureResource;
+
 pub fn make_index_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Foreground index buffer"),
@@ -97,4 +101,10 @@ pub fn send_uniform_buffer(queue: &wgpu::Queue, screen: &super::ScreenDescriptor
     };
 
     queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[content]));
+}
+
+pub fn release_textures(ids: &[egui::TextureId], cache: &mut HashMap<egui::TextureId, TextureResource>) {
+    for id in ids {
+        cache.remove(id);
+    }
 }

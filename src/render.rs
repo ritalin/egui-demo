@@ -225,6 +225,8 @@ impl WgpuRenderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         texture.present();
+
+        buffer::release_textures(&images.free, &mut self.texture_cache);
         Ok(())
     }
 }
