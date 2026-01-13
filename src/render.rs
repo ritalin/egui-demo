@@ -4,6 +4,7 @@ use egui::epaint::Vertex;
 use wgpu::{SurfaceTargetUnsafe, rwh::{HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle}, util::DeviceExt};
 
 mod buffer;
+mod texture;
 
 pub struct RawWindow {
     display_handle: RawDisplayHandle,
@@ -42,6 +43,8 @@ pub struct WgpuRenderer {
     index_buffer: wgpu::Buffer,
     bg_pipeline: wgpu::RenderPipeline,
     fg_pipeline: wgpu::RenderPipeline,
+    samplers: egui::ahash::HashMap<egui::TextureOptions, wgpu::Sampler>,
+    texture_cache: egui::ahash::HashMap<egui::TextureId, texture::TextureResource>,
 }
 impl WgpuRenderer {
     pub async fn create(frame_width: u32, framw_height: u32, target: &RawWindow) -> Result<Self, anyhow::Error> {
@@ -151,38 +154,9 @@ impl WgpuRenderer {
             ],
         });
 
-        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Default texture sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
-        });
-        let buffer_fallback = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Texture image fallback"),
-            size: wgpu::Extent3d{ width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[ wgpu::TextureFormat::Rgba8Unorm ],
-        });
-        let texture_fallback = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("texture bind group fallback"),
-            layout: &texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&buffer_fallback.create_view(&wgpu::TextureViewDescriptor::default())),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
-                },
-            ],
-        });
+        let linear_sampler = texture::into_sampler(&device, egui::TextureOptions::LINEAR, Some("Texture sampler fallback"));
+        let buffer_fallback = texture::into_texture(&device, wgpu::Extent3d{ width: 1, height: 1, depth_or_array_layers: 1 }, Some("Texture image fallback"));
+        let texture_fallback = texture::into_bind_group(&device, &texture_layout, &buffer_fallback, &linear_sampler, Some("texture bind group fallback"));
 
         let vertex_buffer = buffer::make_vertex_buffer(&device, size_of::<Vertex>() as u64 * 1024);
         let index_buffer = buffer::make_index_buffer(&device, size_of::<u32>() as u64 * 1024 * 3);
@@ -203,6 +177,8 @@ impl WgpuRenderer {
             index_buffer,
             bg_pipeline,
             fg_pipeline,
+            samplers: [(egui::TextureOptions::LINEAR, linear_sampler)].into_iter().collect(),
+            texture_cache: egui::ahash::HashMap::default(),
         })
     }
 
@@ -216,7 +192,8 @@ impl WgpuRenderer {
     pub fn render(
         &mut self,
         screen: &ScreenDescriptor,
-        triangles: &[egui::ClippedPrimitive]) -> Result<(), wgpu::SurfaceError>
+        triangles: &[egui::ClippedPrimitive],
+        images: &egui::TexturesDelta) -> Result<(), wgpu::SurfaceError>
     {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render encoder"),
@@ -227,13 +204,23 @@ impl WgpuRenderer {
 
         encode_bg(&mut encoder, &texture_view, &self.bg_pipeline);
 
-        // buffer::send_texture();
+        texture::update_samplers(&self.device, images.set.iter().map(|(_, image)| image.options), &mut self.samplers);
+        texture::send_texture_images_pos(&self.queue, &images.set, &self.texture_cache);
+        let resources = texture::send_texture_images_new(&self.device, &self.queue, &self.samplers, &images.set);
+        texture::update_bind_groups(&self.device, &self.texture_layout, resources, &mut self.texture_cache);
 
         let (vbuffer_size, ibuffer_size) = buffer::measure_buffer_size(triangles);
         if (vbuffer_size > 0) && (ibuffer_size > 0) {
             buffer::send_vertex_buffer(&mut self.device, &self.queue, vbuffer_size, triangles, &mut self.vertex_buffer);
             buffer::send_index_buffer(&mut self.device, &self.queue, ibuffer_size, triangles, &mut self.index_buffer);
-            encode_fg(&mut encoder, &texture_view, &self.fg_pipeline, &self.vertex_buffer, &self.index_buffer, &self.uniform, &self.texture_fallback, screen, triangles);
+            encode_fg(
+                &mut encoder, &texture_view, &self.fg_pipeline,
+                &self.vertex_buffer, &self.index_buffer,
+                &self.uniform, &self.texture_fallback,
+                &self.texture_cache,
+                screen,
+                triangles,
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -269,7 +256,7 @@ fn make_background_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfigu
             conservative: false,
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState { count: 1, mask: 0, alpha_to_coverage_enabled: false },
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
         fragment: Some(wgpu::FragmentState {
             module:&shader,
             entry_point: Some("fs_main"),
@@ -328,7 +315,18 @@ fn make_freground_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfigur
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })
             ],
@@ -370,6 +368,7 @@ fn encode_fg(
     index_buffer: &wgpu::Buffer,
     uniform_bind_group: &wgpu::BindGroup,
     bind_group_fallback: &wgpu::BindGroup,
+    texture_cache: &egui::ahash::HashMap<egui::TextureId, texture::TextureResource>,
     screen: &ScreenDescriptor,
     triangles: &[egui::ClippedPrimitive])
 {
@@ -401,19 +400,23 @@ fn encode_fg(
     let mut voffset = 0;
     let mut ioffset = 0;
 
-    pass.set_bind_group(1, bind_group_fallback, &[]);
-
     for egui::ClippedPrimitive{ clip_rect, primitive } in triangles {
         let Some((x, y, width, height)) = to_scissor_rect(clip_rect, &screen) else { continue };
         pass.set_scissor_rect(x, y, width, height);
 
         match primitive {
-            egui::epaint::Primitive::Mesh(egui::Mesh{ indices, vertices, .. }) => {
+            egui::epaint::Primitive::Mesh(egui::Mesh{ indices, vertices, texture_id: id }) => {
                 let vrange = voffset..voffset + (vertices.len() * size_of::<Vertex>()) as u64;
                 let irange = ioffset..ioffset + (indices.len() * size_of::<u32>()) as u64;
 
                 voffset = vrange.end;
                 ioffset = irange.end;
+
+                let bind_group = texture_cache.get(id).map(|res| &res.bind_group).unwrap_or_else(|| {
+                    log::warn!("bind group is not found, use fallback bind group");
+                    bind_group_fallback
+                });
+                pass.set_bind_group(1, bind_group, &[]);
 
                 pass.set_vertex_buffer(0, vertex_buffer.slice(vrange));
                 pass.set_index_buffer(index_buffer.slice(irange), wgpu::IndexFormat::Uint32);

@@ -9,8 +9,10 @@ struct AppState {
 }
 impl AppState {
     fn new() -> Self {
+        let cx = egui::Context::default();
+
         Self {
-            cx: egui::Context::default(),
+            cx,
             input: egui::RawInput {
                 viewport_id: egui::viewport::ViewportId::ROOT,
                 focused: false,
@@ -111,8 +113,7 @@ impl App {
                 screen_height: size.height,
             };
 
-            // match r.render(&screen, &triangles, &output.textures_delta) {
-            match r.render(&screen, &triangles) {
+            match r.render(&screen, &triangles, &output.textures_delta) {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                     r.request_resize(screen);
@@ -140,7 +141,7 @@ impl ApplicationHandler for App {
     {
         match event {
             WindowEvent::CloseRequested => {
-                if self.main_window.is_none() {
+                if self.main_window.is_some() {
                     self.handle_close_requested(event_loop);
                 }
             }

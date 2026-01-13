@@ -1,4 +1,4 @@
-use std::{num::NonZero, task::Waker};
+use std::num::NonZero;
 
 pub fn make_index_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
