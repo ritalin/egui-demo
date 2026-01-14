@@ -4,35 +4,48 @@ use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{self, El
 use crate::render;
 
 struct AppState {
-    cx: egui::Context,
-    input: egui::RawInput,
+    zoom_factor: f32,
 }
 impl AppState {
     fn new() -> Self {
-        let cx = egui::Context::default();
-
         Self {
-            cx,
-            input: egui::RawInput {
-                viewport_id: egui::viewport::ViewportId::ROOT,
-                focused: false,
-                ..Default::default()
-            }
+            zoom_factor: 1.0,
         }
     }
 
-    fn update(&mut self, scale_factor: f64) -> egui::FullOutput {
-        let mut input = self.input.clone();
-        let viewport = input.viewports.entry(input.viewport_id).or_default();
-        viewport.native_pixels_per_point = Some(scale_factor as f32);
+    fn update(&mut self, window: &winit::window::Window, state: &mut egui_winit::State) -> (bool, egui::FullOutput) {
+        let scale_factor = window.scale_factor() as f32;
+        let old_zoom = self.zoom_factor;
+        let input = state.take_egui_input(window);
 
-        self.cx.run(input, |cx| {
+        let mut output = state.egui_ctx().run(input, |cx| {
             egui::Area::new(egui::Id::new("winit + egui + wgpu says hello!"))
                 .show(cx, |ui| {
                     ui.label("Label!");
+                    if ui.button("boom!").clicked() {
+                        println!("Boom!");
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(&format!("ppp: scale ({}) x mag ({}) = {}", scale_factor, old_zoom, scale_factor * old_zoom));
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("-").clicked() {
+                            self.zoom_factor = (self.zoom_factor - 0.1).max(0.3);
+                        }
+                        if ui.button("+").clicked() {
+                            self.zoom_factor = (self.zoom_factor + 0.1).min(3.0);
+                        }
+                    });
                 })
             ;
-        })
+        });
+
+        state.egui_ctx().set_pixels_per_point(scale_factor * self.zoom_factor);
+        output.pixels_per_point = scale_factor * self.zoom_factor;
+
+        (self.zoom_factor != old_zoom, output)
     }
 }
 
@@ -40,17 +53,19 @@ pub struct App {
     main_window: Option<Arc<Window>>,
     raw_handle: Option<render::RawWindow>,
     renderer: Option<render::WgpuRenderer>,
+    window_state: Option<egui_winit::State>,
     state: AppState,
 }
 impl App {
     const DEFAULT_WIDTH: u32 = 1360;
-    const DEFAULT_HEIGHT: u32 = 768;
+    const DEFAULT_HEIGHT: u32 = 1024;
 
     pub fn new() -> Self {
         Self {
             main_window: None,
             raw_handle: None,
             renderer: None,
+            window_state: None,
             state: AppState::new(),
         }
     }
@@ -67,9 +82,18 @@ impl App {
         };
 
         let mut renderer = render::WgpuRenderer::create(screen.screen_width, screen.screen_height, &raw_handle).await?;
-        renderer.request_resize(screen);
+        renderer.request_resize(&screen);
 
         self.renderer = Some(renderer);
+
+        self.window_state = Some(egui_winit::State::new(
+            egui::Context::default(),
+            egui::viewport::ViewportId::ROOT,
+            &w,
+            Some(w.scale_factor() as f32),
+            None,
+            None
+        ));
 
         self.main_window.get_or_insert_with(|| w);
         self.raw_handle = Some(raw_handle);
@@ -85,24 +109,24 @@ impl App {
         log::info!("Resize requested: width: {width}, height: {height}", width = size.width, height = size.height);
         if let (Some(w), Some(renderer)) = (self.main_window.as_ref(), self.renderer.as_mut()) && (size.width > 0) && (size.height > 0) {
             let screen = render::ScreenDescriptor {
-                pixel_per_point: w.scale_factor() as f32,
+                pixel_per_point: w.scale_factor() as f32 * self.state.zoom_factor,
                 screen_width: size.width,
                 screen_height: size.height,
             };
-            renderer.request_resize(screen);
+            renderer.request_resize(&screen);
         }
     }
 
     fn handle_redraw(&mut self, _event_loop: &ActiveEventLoop) {
-        if let (Some(w), Some(r)) = (self.main_window.as_ref(), self.renderer.as_mut()) {
+        if let (Some(w), Some(s), Some(r)) = (self.main_window.as_ref(), self.window_state.as_mut(), self.renderer.as_mut()) {
             if let Some(y) = w.is_minimized() && y {
                 log::info!("Skip to render because the window is minimized");
                 return;
             }
-            let output = self.state.update(w.scale_factor());
+            let (scale_changed, output) = self.state.update(w, s);
             // dump_output(&output).expect("failed to dump egui output");
 
-            let triangles = self.state.cx.tessellate(output.shapes, output.pixels_per_point);
+            let triangles = s.egui_ctx().tessellate(output.shapes, output.pixels_per_point);
 
             w.request_redraw(); // Reserve the next redrawing
 
@@ -113,10 +137,14 @@ impl App {
                 screen_height: size.height,
             };
 
+            if scale_changed {
+                r.request_rescale(&screen);
+            }
+
             match r.render(&screen, &triangles, &output.textures_delta) {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                    r.request_resize(screen);
+                    r.request_resize(&screen);
                 }
                 Err(e) => log::error!("Unable to render (reason: {e}"),
             }
@@ -139,6 +167,9 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent)
     {
+        let (Some(w), Some(state)) = (self.main_window.as_ref(), self.window_state.as_mut()) else { return };
+        let _ = state.on_window_event(&w, &event);
+
         match event {
             WindowEvent::CloseRequested => {
                 if self.main_window.is_some() {

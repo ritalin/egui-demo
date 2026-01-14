@@ -132,7 +132,7 @@ impl WgpuRenderer {
             label: Some("Uniform buffer"),
             contents: bytemuck::cast_slice(&[
                 buffer::UniformBuffer {
-                    screen_size_opints: [0.0, 0.0],
+                    screen_size_optionts: [0.0, 0.0],
                     dithering: 0,
                     predicatable_texture_fintering: 0,
                 }
@@ -182,10 +182,14 @@ impl WgpuRenderer {
         })
     }
 
-    pub fn request_resize(&mut self, screen: ScreenDescriptor) {
+    pub fn request_resize(&mut self, screen: &ScreenDescriptor) {
         self.config.width = screen.screen_width;
         self.config.height = screen.screen_height;
         self.surface.configure(&self.device, &self.config);
+        buffer::send_uniform_buffer(&self.queue, &screen, &self.uniform_buffer);
+    }
+
+    pub fn request_rescale(&mut self, screen: &ScreenDescriptor) {
         buffer::send_uniform_buffer(&self.queue, &screen, &self.uniform_buffer);
     }
 
